@@ -1,4 +1,4 @@
-import { TURN_MS, DND_BOSS_SEAT, DND_CLASS_MOVE, DND_CLASS_RANGE, DND_DIFFICULTY_MULTIPLIER, DND_EQUIPMENT_SPEC, DND_EQUIPMENT_NAME, type DndDifficulty, type DndEquipment, type PlayerId, type DndAction, type DndCellView, type DndSeatInfo, type DndPiece, type DndFx, type DndFxKind, type LogEvent, type DownstairsCharacterId, type DndClassId } from 'shared';
+import { TURN_MS, DND_BOSS_SEAT, DND_CLASS_MOVE, DND_CLASS_RANGE, DND_DIFFICULTY_MULTIPLIER, DND_DIFFICULTY_AC_BONUS, DND_EQUIPMENT_SPEC, DND_EQUIPMENT_NAME, type DndDifficulty, type DndEquipment, type PlayerId, type DndAction, type DndCellView, type DndSeatInfo, type DndPiece, type DndFx, type DndFxKind, type LogEvent, type DownstairsCharacterId, type DndClassId } from 'shared';
 
 export type Seats = Array<PlayerId | null>;
 
@@ -128,7 +128,7 @@ export const CLASS_STATS: Record<DndClassId, { name: string; hp: number; ac: num
   gladiator: { name: 'Gladiator (鬥士)', hp: 30, ac: 12, attackBonus: 4, dmgDice: 10, dmgFlat: 2, description: '血厚甲薄的前線輸出。【野蠻衝撞】：衝到 5 格內的目標身旁，造成 5 傷害並暈眩 1 回合。【嗜血】：命中時各 1/2 機率致命斬殺（傷害 ×1.2）或旋風（周圍 8 格各吃半刀） (移動3格)' },
   archer: { name: 'Archer (弓手)', hp: 18, ac: 12, attackBonus: 6, dmgDice: 8, dmgFlat: 2, description: '射程 5 格的後排輸出。【狙擊】：接下來 6 回合無視射程，帶弓時每次出手連射。【獵殺】：命中與否都各 1/2 機率放血（3 回合每回合 -1）或穿刺（射中時才會貫穿到目標正後方的怪） (移動3格)' },
   bard: { name: 'Bard (吟遊詩人)', hp: 18, ac: 12, attackBonus: 3, dmgDice: 6, dmgFlat: 3, description: '全隊的增益核心。【進擊之歌】：一回合內全隊傷害 +40%（冷卻 2 回合）。【即興吟唱】：出手時各 1/3 機率讓全隊 AC +3、命中 +2，或全體回 1 點 HP (移動3格)' },
-  summoner: { name: 'Summoner (召喚術士)', hp: 20, ac: 12, attackBonus: 3, dmgDice: 6, dmgFlat: 2, description: '把敵人變成戰力的術士，攻擊距離 2 格。【魔物召喚】：召出 2 隻替你作戰的哥布林。【墮落低語】：出手時各 1/3 機率洗腦目標、讓牠魅惑後遊蕩 2 回合，或發動魂體轉化強化隨從 (移動2格)' },
+  summoner: { name: 'Summoner (召喚術士)', hp: 20, ac: 12, attackBonus: 3, dmgDice: 6, dmgFlat: 2, description: '把敵人變成戰力的術士，攻擊距離 2 格。【魔物召喚】：召出替你作戰的哥布林，一次補滿到上限（空手 2 隻，【召喚書】每階再 +1）。【墮落低語】：出手時各 1/3 機率洗腦目標、讓牠魅惑後遊蕩 2 回合，或發動魂體轉化強化隨從 (移動2格)' },
 };
 
 /**
@@ -295,13 +295,16 @@ function makeGoblin(id: string, template: MonsterTemplate): DndPiece {
 /**
  * 依難度縮放怪物的 HP 與 AC。傷害是在攻擊時才乘（runMonstersTurn），
  * 因為傷害是每次擲骰算出來的，不像血量與護甲是掛在棋子上的固定值。
+ *
+ * HP 走乘法、AC 走加法，兩者刻意用不同的表 —— 理由寫在 DND_DIFFICULTY_AC_BONUS。
  */
 function scaleMonster(piece: DndPiece, difficulty: DndDifficulty): DndPiece {
   const mult = DND_DIFFICULTY_MULTIPLIER[difficulty];
-  if (mult === 1) return piece;
+  const acBonus = DND_DIFFICULTY_AC_BONUS[difficulty];
+  if (mult === 1 && acBonus === 0) return piece;
   piece.hp = Math.max(1, Math.round(piece.hp * mult));
   piece.maxHp = Math.max(1, Math.round(piece.maxHp * mult));
-  piece.ac = Math.max(1, Math.round(piece.ac * mult));
+  piece.ac = Math.max(1, piece.ac + acBonus);
   return piece;
 }
 
@@ -1053,7 +1056,8 @@ function equipmentEffectText(classId: DndClassId, tier: Exclude<DndDifficulty, '
     case 'bard':
       return `全隊的 AC／傷害／命中常駐 +${spec.bardAura}，三首歌的效果也各再 +${spec.songBonus}`;
     case 'summoner':
-      return `召喚上限 +${spec.summonBonus}，並解鎖更強的隨從`;
+      return `一次召喚的數量與同時在場上限都 +${spec.summonBonus}`
+        + `（變成 ${SUMMON_BASE_CAP + spec.summonBonus} 隻），並解鎖更強的隨從`;
     case 'bubble':
       return `普通攻擊不論命中與否都追加「命中骰 ×${spec.diceRatio}」的傷害，`
         + `【撒網】多綁 ${spec.netBonusTurns} 回合、每回合多扣 ${spec.netBonusDamage} 點，`
@@ -1229,7 +1233,11 @@ function findAnyMonster(state: DndState): { piece: DndPiece; r: number; c: numbe
   return null;
 }
 
-/** 召喚術士：基礎召喚數與上限，【召喚書】會把上限往上加。 */
+/**
+ * 召喚術士沒帶【召喚書】時的隨從上限。
+ * 單次召喚會一口氣補滿到上限，所以這同時也是空手時一次召幾隻 ——
+ * 書把上限往上加，單次數量就跟著一起加。
+ */
 const SUMMON_BASE_CAP = 2;
 /**
  * 一層樓最多召喚幾次。上限只擋「同時存在幾隻」，擋不住無限補充 ——
@@ -1240,7 +1248,7 @@ const SUMMON_PER_LEVEL = 2;
 const DOOM_TURNS = 5;
 /** 【魅惑】讓怪物漫無目的地遊蕩幾回合。 */
 const CHARM_WANDER_TURNS = 2;
-/** 【魂體轉化】：隨從的命中與傷害各提升幾成、持續幾輪，外加永久的 HP。 */
+/** 【魂體轉化】：隨從的命中與傷害各提升幾成、持續幾輪，外加回復的 HP（不超過上限）。 */
 const ALLY_TRANSMUTE_RATIO = 0.3;
 const ALLY_TRANSMUTE_TURNS = 1;
 const ALLY_TRANSMUTE_HP = 2;
@@ -1265,6 +1273,7 @@ function allyCount(state: DndState): number {
 /**
  * 召喚術士這一次能召出什麼、上限是多少。
  * 沒有【召喚書】時是 2 隻普通哥布林；書會把上限往上加，並解鎖更硬的隨從。
+ * 單次召喚一律補滿到 cap，所以這個數字同時是「同時在場上限」與「一次召幾隻」。
  */
 function summonRosterOf(state: DndState, seat: number): { cap: number; roster: MonsterTemplate[] } {
   const spec = equipmentOf(state, seat);
@@ -1319,7 +1328,7 @@ function summonerPassive(
     return events;
   }
 
-  // 【魂體轉化】：這一輪隨從打得更兇更準，血量則是永久加上去的。
+  // 【魂體轉化】：這一輪隨從打得更兇更準，並且順手補血 —— 只補回當前血量，不動血條上限。
   // 圖示掛在每一隻隨從身上 —— 三個結果裡只有這個沒有位移也沒有換邊，
   // 不在棋盤上留下痕跡的話，玩家會以為自己從來沒抽到它。
   state.allyRage = ALLY_TRANSMUTE_TURNS;
@@ -1328,8 +1337,7 @@ function summonerPassive(
     for (let c = 0; c < BOARD_SIZE; c++) {
       const piece = state.board[r]?.[c]?.piece;
       if (!isAlly(piece)) continue;
-      piece!.maxHp += ALLY_TRANSMUTE_HP;
-      piece!.hp += ALLY_TRANSMUTE_HP;
+      piece!.hp = Math.min(piece!.maxHp, piece!.hp + ALLY_TRANSMUTE_HP);
       pushFx(state, piece!.id, 'transmute');
       touched++;
     }
@@ -1337,7 +1345,7 @@ function summonerPassive(
   events.push({
     t: 'dndMessage', kind: 'skill',
     message: `🔺 術士施展【魂體轉化】—— 這一輪隨從的攻擊力與命中率各提高 `
-      + `${Math.round(ALLY_TRANSMUTE_RATIO * 100)}%，並永久獲得 ${ALLY_TRANSMUTE_HP} 點 HP`
+      + `${Math.round(ALLY_TRANSMUTE_RATIO * 100)}%，並各回復 ${ALLY_TRANSMUTE_HP} 點 HP`
       + `${touched === 0 ? '（可惜場上一個隨從也沒有）' : ''}！`,
   } as any);
   return events;
@@ -1413,6 +1421,8 @@ function runAlliesTurn(seats: Seats, state: DndState, rng: () => number): LogEve
       const bonus = raging ? Math.round(base * (1 + ALLY_TRANSMUTE_RATIO)) : base;
       if (roll + bonus >= target.piece.ac) {
         let dmg = Math.floor(rng() * (located.piece.dmgDice ?? 6)) + 1;
+        // 難度乘數吃在傷害上，跟敵怪同一套（HP 與 AC 是生出來時就縮放好的）
+        dmg = Math.max(1, Math.round(dmg * DND_DIFFICULTY_MULTIPLIER[state.difficulty]));
         if (raging) dmg = Math.max(1, Math.round(dmg * (1 + ALLY_TRANSMUTE_RATIO)));
         target.piece.hp = Math.max(0, target.piece.hp - dmg);
         events.push({
@@ -1702,7 +1712,7 @@ const NPC_HEAL_THRESHOLD = 0.7;
 const NPC_RETREAT_RATIO = NPC_HEAL_THRESHOLD;
 /** 牧師【神聖治癒】的射程與治療量，真人與 NPC 共用 */
 const CLERIC_HEAL_RANGE = 3;
-const CLERIC_HEAL_AMOUNT = 4;
+const CLERIC_HEAL_AMOUNT = 5;
 
 /**
  * 盜賊的攻擊被動：命中時二選一，各 1/2。
@@ -1940,6 +1950,43 @@ function seatIndexOfPiece(seats: Seats, piece: DndPiece): number {
   if (piece.playerId) return seats.indexOf(piece.playerId);
   if (piece.id.startsWith('npc-')) return parseInt(piece.id.split('-')[1]!, 10);
   return -1;
+}
+
+/**
+ * 牧師【神聖治癒】的結算：補主目標，帶【法杖】時其他隊員也一起回。
+ * 真人與 NPC 共用一份 —— NPC 那條以前寫死 CLERIC_HEAL_AMOUNT，
+ * 同一把杖在他手上少了主治療的加成、濺射也整個沒有。
+ *
+ * 只負責改狀態並回報補了多少；事件由呼叫端各自組，因為兩邊要發的不一樣
+ * （真人只發一則訊息，NPC 還要多發一筆 dndAttack 讓治療量進到傷害欄）。
+ * 目標的射程與合法性也留給呼叫端判斷。
+ */
+function applyClericHeal(
+  seats: Seats,
+  state: DndState,
+  healerSeat: number,
+  targetPiece: DndPiece,
+): { main: number; splash: number } {
+  const staff = equipmentOf(state, healerSeat);
+  const main = staff?.healMain ?? CLERIC_HEAL_AMOUNT;
+  targetPiece.hp = Math.min(targetPiece.maxHp, targetPiece.hp + main);
+  const targetSeat = seatIndexOfPiece(seats, targetPiece);
+  if (targetSeat !== -1 && state.seats[targetSeat]) {
+    state.seats[targetSeat]!.hp = targetPiece.hp;
+  }
+
+  const splash = staff?.healSplash ?? 0;
+  if (splash > 0) {
+    for (let seat = 0; seat < SEAT_COUNT; seat++) {
+      const info = state.seats[seat];
+      if (!info?.alive) continue;
+      const ally = findSeatPiece(seats, state, seat)?.piece;
+      if (!ally || ally.id === targetPiece.id) continue;
+      ally.hp = Math.min(ally.maxHp, ally.hp + splash);
+      info.hp = ally.hp;
+    }
+  }
+  return { main, splash };
 }
 
 /**
@@ -3504,35 +3551,17 @@ export function applyDndAction(
       const dist = Math.abs(pr - tr) + Math.abs(pc - tc);
       if (dist > CLERIC_HEAL_RANGE) return { ok: false, error: 'TARGET_OUT_OF_RANGE' };
 
-      const staff = equipmentOf(state, activeSeat);
-      const healAmt = staff?.healMain ?? CLERIC_HEAL_AMOUNT;
-      targetPiece.hp = Math.min(targetPiece.maxHp, targetPiece.hp + healAmt);
-      
-      let tSeatIdx = -1;
-      if (targetPiece.playerId) tSeatIdx = seats.indexOf(targetPiece.playerId);
-      else if (targetPiece.id.startsWith('npc-')) tSeatIdx = parseInt(targetPiece.id.split('-')[1]!, 10);
-      
-      if (tSeatIdx !== -1 && state.seats[tSeatIdx]) {
-        state.seats[tSeatIdx]!.hp = targetPiece.hp;
-      }
+      const { main: healAmt, splash } = applyClericHeal(seats, state, activeSeat, targetPiece);
       events.push({ t: 'dndMessage', kind: 'skill', message: `✨ ${playerPiece.name.split(' ')[0]} 施放治癒術，恢復了 ${targetPiece.name.split(' ')[0]} ${healAmt} 點 HP！` } as any);
 
       // 【法杖】：主目標以外的隊員也一起回血
-      if (staff && staff.healSplash > 0) {
-        for (let seat = 0; seat < SEAT_COUNT; seat++) {
-          const info = state.seats[seat];
-          if (!info?.alive) continue;
-          const ally = findSeatPiece(seats, state, seat)?.piece;
-          if (!ally || ally.id === targetPiece.id) continue;
-          ally.hp = Math.min(ally.maxHp, ally.hp + staff.healSplash);
-          info.hp = ally.hp;
-        }
+      if (splash > 0) {
         events.push({
           t: 'dndMessage', kind: 'skill',
-          message: `🔮 法杖的光芒擴散開來，其他隊員各恢復了 ${staff.healSplash} 點 HP！`,
+          message: `🔮 法杖的光芒擴散開來，其他隊員各恢復了 ${splash} 點 HP！`,
         } as any);
       }
-      
+
     } else if (classId === 'bubble') {
       // 【撒網】：對 5 格內的一隻怪物撒網把牠拘束住
       if (!targetId) return { ok: false, error: 'BAD_ACTION' };
@@ -3738,16 +3767,19 @@ export function applyDndAction(
         return { ok: false, error: 'SUMMON_LIMIT' };
       }
 
-      const wanted = Math.min(SUMMON_BASE_CAP, room);
+      // 一口氣補滿到上限：拿到【召喚書】不只解鎖更硬的隨從，一次召出來的數量也跟著變多。
+      // room 一定小於等於 cap（allyCount 不會是負的），所以這裡不用再夾一次。
+      const wanted = room;
       const born: string[] = [];
       for (let i = 0; i < wanted; i++) {
         const template = roster[Math.floor(rng() * roster.length)]!;
-        // 刻意不走 spawnMonster：召喚物一律用模板的原始數值，不吃難度縮放。
-        // 難度該讓敵人變硬，不該連你自己的隨從一起變硬 —— 那樣地獄難度反而更好打。
-        const minion = makeGoblin(
+        // 走 spawnMonster：隨從跟敵怪吃同一套難度縮放。
+        // 不縮放的話，敵人的 AC 被乘上去、隨從的命中卻原地踏步 —— AC 是 d20 上的門檻，
+        // 乘 1.5 等於命中率砍半，地獄難度下隨從會變成完全打不死東西的誘餌。
+        const minion = spawnMonster(state, makeGoblin(
           `ally-${activeSeat}-${state.roundCount}-${i}-${Math.floor(rng() * 1000)}`,
           template,
-        );
+        ));
         minion.ally = true;
         // 召出來的這一輪先站著，不然等於多打一輪
         state.monsterActed.add(minion.id);
@@ -4952,12 +4984,15 @@ function runNpcTurn(seats: Seats, state: DndState, npcSeat: number, rng: () => n
       const used = npcInfo.summonsUsed ?? 0;
       if (used >= SUMMON_PER_LEVEL) return false;
       const { cap, roster } = summonRosterOf(state, npcSeat);
-      if (cap - allyCount(state) <= 0) return false;
+      const room = cap - allyCount(state);
+      if (room <= 0) return false;
 
       let born = 0;
-      for (let i = 0; i < Math.min(SUMMON_BASE_CAP, cap - allyCount(state)); i++) {
+      // 跟真人一樣一口氣補滿到上限
+      for (let i = 0; i < room; i++) {
         const template = roster[Math.floor(rng() * roster.length)]!;
-        const minion = makeGoblin(`ally-${npcSeat}-${state.roundCount}-${i}-${Math.floor(rng() * 1000)}`, template);
+        // 跟真人的召喚一樣吃難度縮放
+        const minion = spawnMonster(state, makeGoblin(`ally-${npcSeat}-${state.roundCount}-${i}-${Math.floor(rng() * 1000)}`, template));
         minion.ally = true;
         state.monsterActed.add(minion.id);
         if (placeNear(state, pr, pc, minion)) born++;
@@ -5001,11 +5036,8 @@ function runNpcTurn(seats: Seats, state: DndState, npcSeat: number, rng: () => n
       }
 
       if (woundedAlly) {
-        woundedAlly.hp = Math.min(woundedAlly.maxHp, woundedAlly.hp + CLERIC_HEAL_AMOUNT);
-        const allySeat = seatIndexOfPiece(seats, woundedAlly);
-        if (allySeat !== -1 && state.seats[allySeat]) {
-          state.seats[allySeat]!.hp = woundedAlly.hp;
-        }
+        // 跟真人牧師走同一份結算，【法杖】的主治療加成與濺射才不會只有真人吃得到
+        const { main: healAmt, splash } = applyClericHeal(seats, state, npcSeat, woundedAlly);
         npcInfo.skillCooldown = 1;
         events.push({
           t: 'dndAttack',
@@ -5013,12 +5045,18 @@ function runNpcTurn(seats: Seats, state: DndState, npcSeat: number, rng: () => n
           target: woundedAlly.name,
           roll: 0,
           hit: true,
-          damage: -CLERIC_HEAL_AMOUNT,
+          damage: -healAmt,
         });
         events.push({
           t: 'dndMessage', kind: 'skill',
           message: `✨ ${npcName.split(' ')[0]} 見 ${woundedAlly.name.split(' ')[0]} 傷勢過重，優先施放了治癒術！`,
         } as any);
+        if (splash > 0) {
+          events.push({
+            t: 'dndMessage', kind: 'skill',
+            message: `🔮 法杖的光芒擴散開來，其他隊員各恢復了 ${splash} 點 HP！`,
+          } as any);
+        }
         return events;
       }
     }

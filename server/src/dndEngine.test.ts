@@ -9,9 +9,16 @@ import {
   checkAndSpawnBossOrStaircase,
   checkDndGameOver,
   BOARD_SIZE,
+  CLASS_STATS,
   type Seats,
 } from './dndEngine.js';
-import { DND_CLASS_MOVE, DND_CLASS_RANGE, DEFAULT_DND_NPC_CLASSES } from 'shared';
+import {
+  DND_CLASS_MOVE,
+  DND_CLASS_RANGE,
+  DEFAULT_DND_NPC_CLASSES,
+  DND_DIFFICULTIES,
+  DND_DIFFICULTY_AC_BONUS,
+} from 'shared';
 
 /** 把 NPC 隊友從棋盤上撤掉 —— 驗單一怪物的行為時，不要讓他們跑過來插手。 */
 function clearNpcs(state) {
@@ -988,6 +995,65 @@ describe('D&D Game Engine', () => {
     expect(res.events.some((e) => e.t === 'dndMessage' && e.message.includes('退到牧師身邊'))).toBe(false);
   });
 
+  /**
+   * NPC 牧師以前寫死 CLERIC_HEAL_AMOUNT，既不讀【法杖】的 healMain 也沒有濺射 ——
+   * 同一把地獄聖杖在真人手上是「主目標 7 + 全隊各 4」，在 NPC 手上只有 5 且無濺射。
+   * 高難度下隊伍靠 NPC 牧師撐奶時，這個差距大到直接決定生死。
+   */
+  const npcClericSetup = (equip) => {
+    const seats: Seats = ['p1', null, null, null];
+    const state = dealDnd(seats, { p1: 'brave' }, 'normal', null, null, () => 0);
+    state.traps = [];
+    clearGoblins(state);
+
+    // npc-1 當牧師，npc-2 當重傷的隊友，兩人相鄰
+    const cleric = findPiece(state, (p) => p.id === 'npc-1');
+    cleric.piece.classId = 'star';
+    state.seats[1].classId = 'star';
+    state.seats[1].skillCooldown = 0;
+    if (equip) state.seats[1].equipment = { kind: 'star', tier: 'hell' }; // healMain 7 / healSplash 4
+    state.board[cleric.r][cleric.c].piece = null;
+    state.board[8][6].piece = cleric.piece;
+
+    const hurt = findPiece(state, (p) => p.id === 'npc-2');
+    state.board[hurt.r][hurt.c].piece = null;
+    state.board[8][7].piece = hurt.piece;
+    hurt.piece.maxHp = 30;
+    hurt.piece.hp = 10; // 33%，低於 70% 的門檻
+    state.seats[2].maxHp = 30;
+    state.seats[2].hp = 10;
+
+    // 真人擺遠一點，免得他自己被選成治療目標
+    const me = findPiece(state, (p) => p.playerId === 'p1');
+    state.board[me.r][me.c].piece = null;
+    state.board[0][0].piece = me.piece;
+
+    const res = applyDndAction(seats, state, 'p1', { kind: 'rest' }, () => 0.9);
+    return { state, res, hurtAfter: findPiece(state, (p) => p.id === 'npc-2').piece };
+  };
+
+  it('should heal for the staff amount when the NPC cleric has one', () => {
+    const { res, hurtAfter } = npcClericSetup(true);
+    // 治療事件是精確值；血量還會被傷者自己那一回合的休息 +1，所以另外比對兩種設定的差
+    expect(res.events.some((e) => e.t === 'dndAttack' && e.damage === -7)).toBe(true);
+    expect(hurtAfter.hp).toBe(18); // 10 + healMain 7 + 休息 1
+    expect(hurtAfter.hp - npcClericSetup(false).hurtAfter.hp).toBe(2); // healMain 7 − 基礎 5
+  });
+
+  it('should spread the staff splash heal from the NPC cleric too', () => {
+    const { state, res } = npcClericSetup(true);
+    // 主目標以外的隊員各回 healSplash 4 —— 以前 NPC 這條完全沒有濺射
+    expect(state.seats[1].hp).toBe(Math.min(state.seats[1].maxHp, 18 + 4)); // 牧師自己也算在內
+    expect(res.events.some((e) => e.t === 'dndMessage' && e.message.includes('法杖的光芒'))).toBe(true);
+  });
+
+  it('should fall back to the base heal when the NPC cleric has no staff', () => {
+    const { res, hurtAfter } = npcClericSetup(false);
+    expect(res.events.some((e) => e.t === 'dndAttack' && e.damage === -5)).toBe(true);
+    expect(hurtAfter.hp).toBe(16); // 10 + CLERIC_HEAL_AMOUNT 5 + 休息 1
+    expect(res.events.some((e) => e.t === 'dndMessage' && e.message.includes('法杖的光芒'))).toBe(false);
+  });
+
   it('should let a boss take the decoy bait too', () => {
     const seats: Seats = ['p1', null, null, null];
     const state = dealDnd(seats, { p1: 'archer' }, 'normal', null, null, () => 0);
@@ -1385,12 +1451,13 @@ describe('D&D Game Engine', () => {
   // ---------------------------------------------------------------------------
 
   it('should scale monster HP and AC by the room difficulty', () => {
-    // 一樓的 Goblin A 基準值是 HP 14 / AC 11
+    // 一樓的 Goblin A 基準值是 HP 14 / AC 11。
+    // HP 走乘法、AC 走加法 —— AC 是 d20 上的門檻，乘法會讓命中率斷崖式下滑
     const cases = [
-      { difficulty: 'easy', hp: 10, ac: 8 },     // ×0.7
-      { difficulty: 'normal', hp: 14, ac: 11 },  // ×1
-      { difficulty: 'hard', hp: 17, ac: 13 },    // ×1.2
-      { difficulty: 'hell', hp: 21, ac: 17 },    // ×1.5
+      { difficulty: 'easy', hp: 10, ac: 9 },     // HP ×0.7、AC -2
+      { difficulty: 'normal', hp: 14, ac: 11 },  // HP ×1、AC +0
+      { difficulty: 'hard', hp: 17, ac: 13 },    // HP ×1.2、AC +2
+      { difficulty: 'hell', hp: 21, ac: 15 },    // HP ×1.5、AC +4
     ];
 
     for (const c of cases) {
@@ -1421,10 +1488,10 @@ describe('D&D Game Engine', () => {
 
     applyDndAction(seats, state, 'p1', { kind: 'attack', targetId: 'm-last' }, () => 0.9);
 
-    // 督軍基準 HP 35 / AC 12 → ×1.5
+    // 督軍基準 HP 35 / AC 12 → HP ×1.5、AC +4
     const boss = findPiece(state, (p) => p.id === 'boss-1');
     expect(boss.piece.hp).toBe(53);
-    expect(boss.piece.ac).toBe(18);
+    expect(boss.piece.ac).toBe(16);
   });
 
   it('should scale monster damage by the room difficulty', () => {
@@ -1457,6 +1524,30 @@ describe('D&D Game Engine', () => {
     expect(damageOn('easy')).toBe(9);   // round(13 * 0.7)
     expect(damageOn('hard')).toBe(16);  // round(13 * 1.2)
     expect(damageOn('hell')).toBe(20);  // round(13 * 1.5)
+  });
+
+  /**
+   * 這一條是難度縮放的核心不變式，不是普通的數值檢查。
+   *
+   * 命中判定是 `roll + hitBonus >= ac`，沒有大成功規則，所以只要 AC 超過
+   * 「20 + 命中加值」，那個目標就是數學上打不到 —— 不是很難打，是命中率 0%。
+   * 舊的 AC ×1.5 讓邪神在地獄難度變成 AC 24，基礎命中 +3 的四個職業
+   * （法師／牧師／詩人／術士）連擲出 20 都摸不到牠，整隊直接卡死。
+   *
+   * 所以無論之後怎麼調難度數值，全遊戲最硬的敵人都必須留在最弱職業的擲骰範圍內。
+   */
+  it('should never push any monster AC beyond what the weakest attacker can roll', () => {
+    const weakestBonus = Math.min(...Object.values(CLASS_STATS).map((c) => c.attackBonus));
+    expect(weakestBonus).toBe(3); // 法師／牧師／詩人／術士
+
+    // 全遊戲基準 AC 最高的敵人：哥布林邪神 16
+    const toughestBaseAc = 16;
+
+    for (const difficulty of DND_DIFFICULTIES) {
+      const scaled = toughestBaseAc + DND_DIFFICULTY_AC_BONUS[difficulty];
+      // 20 + 3 = 23：等號成立代表「只有擲 20 才中」，已經是可接受的極限
+      expect(scaled).toBeLessThanOrEqual(20 + weakestBonus);
+    }
   });
 
   // ---------------------------------------------------------------------------
@@ -3607,7 +3698,7 @@ describe('D&D Game Engine', () => {
     expect(checkDndGameOver(seats, state).over).toBe(false);
   });
 
-  it('should keep summoned minions at their base stats on every difficulty', () => {
+  it('should scale summoned minions with the difficulty, exactly like hostile monsters', () => {
     const stats = (difficulty) => {
       const { seats, state } = soloTable('summoner', { tanky: true, difficulty });
       applyDndAction(seats, state, 'p1', { kind: 'skill' }, () => 0.5);
@@ -3615,11 +3706,15 @@ describe('D&D Game Engine', () => {
       return { hp: minion.piece.maxHp, ac: minion.piece.ac };
     };
 
-    // 難度只該讓敵人變硬，自己的隨從一律照模板的原始數值
+    // 隨從跟敵怪吃同一套縮放，相對強度才不會隨難度崩掉 ——
+    // 敵人變硬、隨從原地踏步的話，地獄難度下隨從根本打不動任何東西
+    const normal = stats('normal');
     const easy = stats('easy');
     const hell = stats('hell');
-    expect(hell.hp).toBe(easy.hp);
-    expect(hell.ac).toBe(easy.ac);
+    expect(easy.hp).toBe(Math.round(normal.hp * 0.7));
+    expect(easy.ac).toBe(normal.ac - 2);
+    expect(hell.hp).toBe(Math.round(normal.hp * 1.5));
+    expect(hell.ac).toBe(normal.ac + 4);
   });
 
   it('should refuse to summon past the cap', () => {
@@ -3637,14 +3732,23 @@ describe('D&D Game Engine', () => {
 
   it('should only allow two summons per floor', () => {
     const { seats, state } = soloTable('summoner', { tanky: true });
-    state.seats[0].equipment = { kind: 'summoner', tier: 'hell' }; // 上限夠大，卡的是次數
+    // 每次召喚都補滿到上限，所以要驗「次數」就得在中間把隨從清掉騰出空額
+    const wipeAllies = () => {
+      for (let r = 0; r < state.board.length; r++) {
+        for (let c = 0; c < state.board[r].length; c++) {
+          if (state.board[r][c].piece?.ally) state.board[r][c].piece = null;
+        }
+      }
+    };
 
     applyDndAction(seats, state, 'p1', { kind: 'skill' }, () => 0.5);
+    wipeAllies();
     applyDndAction(seats, state, 'p1', { kind: 'rest' }, () => 0.5);
     applyDndAction(seats, state, 'p1', { kind: 'skill' }, () => 0.5);
     expect(state.seats[0].summonsUsed).toBe(2);
 
     // 第三次不管場上還有沒有空額都不行
+    wipeAllies();
     applyDndAction(seats, state, 'p1', { kind: 'rest' }, () => 0.5);
     const third = applyDndAction(seats, state, 'p1', { kind: 'skill' }, () => 0.5);
     expect(third.ok).toBe(false);
@@ -3666,13 +3770,45 @@ describe('D&D Game Engine', () => {
     const { seats, state } = soloTable('summoner', { tanky: true });
     state.seats[0].equipment = { kind: 'summoner', tier: 'hell' }; // 上限 2 + 3 = 5
 
+    // 一次就補滿到上限，不必召兩次
     applyDndAction(seats, state, 'p1', { kind: 'skill' }, () => 0.5);
-    applyDndAction(seats, state, 'p1', { kind: 'rest' }, () => 0.5);
-    applyDndAction(seats, state, 'p1', { kind: 'skill' }, () => 0.5);
-    // 一層兩次剛好用完，場上會有 4 隻
-    expect(countPieces(state, (p) => p.ally === true)).toBe(4);
+    expect(countPieces(state, (p) => p.ally === true)).toBe(5);
     // 召出來的是菁英
     expect(countPieces(state, (p) => p.ally === true && p.name.includes('菁英'))).toBeGreaterThan(0);
+  });
+
+  it.each([
+    ['normal', 3],
+    ['hard', 4],
+    ['hell', 5],
+  ] as const)('should scale one summon up to the cap with the %s tome', (tier, expected) => {
+    const { seats, state } = soloTable('summoner', { tanky: true });
+    state.seats[0].equipment = { kind: 'summoner', tier };
+
+    applyDndAction(seats, state, 'p1', { kind: 'skill' }, () => 0.5);
+    expect(countPieces(state, (p) => p.ally === true)).toBe(expected);
+  });
+
+  it('should leave no room for a second summon once the first filled the cap', () => {
+    const { seats, state } = soloTable('summoner', { tanky: true });
+    state.seats[0].equipment = { kind: 'summoner', tier: 'normal' };
+
+    applyDndAction(seats, state, 'p1', { kind: 'skill' }, () => 0.5);
+    expect(countPieces(state, (p) => p.ally === true)).toBe(3);
+
+    // 第二次召喚只有在死了隨從、空出位置時才有用
+    applyDndAction(seats, state, 'p1', { kind: 'rest' }, () => 0.5);
+    const again = applyDndAction(seats, state, 'p1', { kind: 'skill' }, () => 0.5);
+    expect(again.ok).toBe(false);
+    if (!again.ok) expect(again.error).toBe('SUMMON_LIMIT');
+
+    // 死一隻就空出一格，補得回來
+    const minion = findPiece(state, (p) => p.ally === true);
+    state.board[minion.r][minion.c].piece = null;
+    applyDndAction(seats, state, 'p1', { kind: 'rest' }, () => 0.5);
+    const refill = applyDndAction(seats, state, 'p1', { kind: 'skill' }, () => 0.5);
+    expect(refill.ok).toBe(true);
+    expect(countPieces(state, (p) => p.ally === true)).toBe(3);
   });
 
   it('should let allies attack hostile monsters', () => {
@@ -3757,13 +3893,16 @@ describe('D&D Game Engine', () => {
     expect(runOnce(true)).toBeGreaterThan(0);
   });
 
-  it('should let transmutation fire from the passive and add HP', () => {
+  it('should let transmutation fire from the passive and heal the minions', () => {
     const { seats, state } = soloTable('summoner', { tanky: true });
     state.board[8][7].piece = { id: 'm-t', type: 'goblin', name: 'T', hp: 999, maxHp: 999, ac: 99 };
 
-    // 場上先放一隻隨從，才驗得到 +2HP
+    // 一隻受傷的、一隻滿血的 —— 補血只補當前血量，血條上限不動
     state.board[8][5].piece = {
-      id: 'ally-1', type: 'goblin', name: '隨從', hp: 16, maxHp: 16, ac: 11, ally: true,
+      id: 'ally-hurt', type: 'goblin', name: '隨從', hp: 10, maxHp: 24, ac: 11, ally: true,
+    };
+    state.board[8][9].piece = {
+      id: 'ally-full', type: 'goblin', name: '隨從', hp: 24, maxHp: 24, ac: 11, ally: true,
     };
 
     // rng 0.9 → 三選一的第三個（魂體轉化）
@@ -3771,9 +3910,14 @@ describe('D&D Game Engine', () => {
     expect(cast.ok).toBe(true);
     expect(cast.events.some((e) => e.t === 'dndMessage' && e.message.includes('魂體轉化'))).toBe(true);
 
-    const ally = findPiece(state, (p) => p.id === 'ally-1');
-    expect(ally.piece.maxHp).toBe(18);
-    expect(ally.piece.hp).toBe(18);
+    const hurt = findPiece(state, (p) => p.id === 'ally-hurt');
+    expect(hurt.piece.hp).toBe(12);
+    expect(hurt.piece.maxHp).toBe(24);
+
+    // 滿血的不會溢出去
+    const full = findPiece(state, (p) => p.id === 'ally-full');
+    expect(full.piece.hp).toBe(24);
+    expect(full.piece.maxHp).toBe(24);
   });
 
   it('should charm an ordinary monster onto the party side', () => {

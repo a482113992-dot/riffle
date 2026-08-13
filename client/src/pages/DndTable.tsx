@@ -11,6 +11,7 @@ import {
   DND_NPC_CONTROL_LABEL,
   DND_DIFFICULTY_LABEL,
   DND_DIFFICULTY_MULTIPLIER,
+  DND_DIFFICULTY_AC_BONUS,
   type RoomView,
   type DndAction,
   type DndCellView,
@@ -46,6 +47,7 @@ import { DndStoryOverlay, DndEndingOverlay } from './dndStory';
 import { StartControls } from '../components/StartControls';
 import { TurnBanner } from '../components/TurnBanner';
 import { useCountdown } from '../hooks/useCountdown';
+import { useDndMotion } from '../hooks/useDndMotion';
 import { emitWithAck, socket } from '../net/socket';
 import { useGame } from '../state/GameProvider';
 import { useSkin } from '../state/skinContext';
@@ -102,6 +104,11 @@ export function DndRoom({ room }: { room: RoomView }) {
     lastStoryLevel.current = game.level;
     setStoryLevel(game.level);
   }, [playing, game?.level, game?.over]);
+
+  // 棋子的走路與受擊震動：比對前後兩張快照自己補動畫，純視覺。
+  // 靠 data-piece-id 找棋子 —— 新增一種會動或會挨打的棋子時記得也掛上去，不然牠只會瞬移。
+  const boardRef = useRef<HTMLDivElement | null>(null);
+  useDndMotion(boardRef, game);
 
   const [turnPhase, setTurnPhase] = useState<'idle' | 'targeting_move' | 'moved' | 'targeting_attack' | 'targeting_skill'>('idle');
   const [pendingMove, setPendingMove] = useState<{ r: number; c: number } | null>(null);
@@ -470,6 +477,7 @@ export function DndRoom({ room }: { room: RoomView }) {
       return (
         <div
           className={`dnd-token player-token${isMe ? ' player-token--active' : ''}${piece.stealth ? ' player-token--hidden' : ''}`}
+          data-piece-id={piece.id}
           data-seat={seatIndex}
           title={`${piece.name} HP ${piece.hp}/${piece.maxHp}`}
           style={{ opacity: isOriginalGhost ? 0.3 : 1 }}
@@ -481,14 +489,14 @@ export function DndRoom({ room }: { room: RoomView }) {
       );
     } else if (piece.type === 'villager') {
       return (
-        <div className="dnd-token villager-token" title={`${piece.name} HP ${piece.hp}/${piece.maxHp}`}>
+        <div className="dnd-token villager-token" data-piece-id={piece.id} title={`${piece.name} HP ${piece.hp}/${piece.maxHp}`}>
           <PixelSprite name={spriteFor(piece)} className="token-icon" />
           <span className="token-label" style={{ color: '#2ecc71', fontSize: '0.65rem' }}>村民</span>
         </div>
       );
     } else if (piece.type === 'decoy') {
       return (
-        <div className="dnd-token decoy-token" title={`${piece.name} HP ${piece.hp}/${piece.maxHp}`}>
+        <div className="dnd-token decoy-token" data-piece-id={piece.id} title={`${piece.name} HP ${piece.hp}/${piece.maxHp}`}>
           <PixelSprite name={spriteFor(piece)} className="token-icon" />
           <span className="token-label" style={{ color: '#9fd8ff', fontSize: '0.62rem' }}>殘影</span>
           {renderFx(piece.id)}
@@ -496,7 +504,7 @@ export function DndRoom({ room }: { room: RoomView }) {
       );
     } else if (piece.type === 'altar') {
       return (
-        <div className="dnd-token altar-token" title={`${piece.name} HP ${piece.hp}/${piece.maxHp}`}>
+        <div className="dnd-token altar-token" data-piece-id={piece.id} title={`${piece.name} HP ${piece.hp}/${piece.maxHp}`}>
           <PixelSprite name="gateAltar" className="token-icon" />
           <span className="token-label" style={{ color: '#b78bff', fontSize: '0.62rem' }}>祭壇</span>
           {renderFx(piece.id)}
@@ -515,6 +523,7 @@ export function DndRoom({ room }: { room: RoomView }) {
       return (
         <div
           className={`dnd-token goblin-token${piece.ally ? ' ally-token' : ''}${piece.id.startsWith('boss-') ? ' boss-token' : ''}${piece.copyClass ? ' copy-token' : ''}${piece.invulnerable ? ' invulnerable-token' : ''}`}
+          data-piece-id={piece.id}
           title={`${piece.name} HP ${piece.hp}/${piece.maxHp}`}
           style={{
             opacity: bossPhase && acted ? 0.35 : 1,
@@ -749,7 +758,9 @@ export function DndRoom({ room }: { room: RoomView }) {
                   </span>
                 )}
                 <span style={{ marginLeft: '0.8rem', fontSize: '0.8rem', color: 'var(--muted)', letterSpacing: 'normal' }}>
-                  {DND_DIFFICULTY_LABEL[game.difficulty]}模式 · 怪物強度 {Math.round(DND_DIFFICULTY_MULTIPLIER[game.difficulty] * 100)}%
+                  {DND_DIFFICULTY_LABEL[game.difficulty]}模式 · 怪物 HP／傷害 {Math.round(DND_DIFFICULTY_MULTIPLIER[game.difficulty] * 100)}%
+                  {DND_DIFFICULTY_AC_BONUS[game.difficulty] !== 0
+                    && ` · 防禦 ${DND_DIFFICULTY_AC_BONUS[game.difficulty] > 0 ? '+' : ''}${DND_DIFFICULTY_AC_BONUS[game.difficulty]}`}
                   {game.bossPlayerId && (
                     <span style={{ color: 'var(--red)' }}>
                       {' '}· 👑 {room.seats.find((s) => s.playerId === game.bossPlayerId)?.nickname ?? '魔王'} 操控怪物
@@ -934,7 +945,7 @@ export function DndRoom({ room }: { room: RoomView }) {
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', flex: '2 1 400px', minWidth: 0 }}>
               {playing && game ? (
                 <div className="dnd-board-container" style={{ width: '100%', maxWidth: '100%', overflowX: 'auto', margin: '0' }}>
-                  <div className="dnd-board" data-level={game.level} style={{ margin: '0 auto' }}>
+                  <div className="dnd-board" ref={boardRef} data-level={game.level} style={{ margin: '0 auto' }}>
                     {game.board.map((row, r) =>
                       row.map((cell, c) => {
                         const currentR = pendingMove ? pendingMove.r : (myPosition?.r ?? 999);
@@ -1039,7 +1050,7 @@ export function DndRoom({ room }: { room: RoomView }) {
                             )}
 
                             {cell.piece && cell.piece.type !== 'staircase' && (
-                              <div className="dnd-hp-bar-container">
+                              <div className="dnd-hp-bar-container" data-piece-id={cell.piece.id}>
                                 <div className="dnd-hp-bar" style={{ width: `${(cell.piece.hp / cell.piece.maxHp) * 100}%`, backgroundColor: cell.piece.type === 'player' ? '#2ecc71' : '#e74c3c' }} />
                               </div>
                             )}
@@ -1311,12 +1322,14 @@ function DndCharacterLobby({ room }: { room: RoomView }) {
       <div style={{ background: 'rgba(255,255,255,0.02)', padding: '1rem', borderRadius: '8px', border: '1px solid var(--line)', marginBottom: '1.5rem' }}>
         <h3 style={{ fontSize: '0.95rem', margin: '0 0 0.3rem 0', color: 'var(--text)' }}>⚔️ 地城難度</h3>
         <p style={{ fontSize: '0.78rem', color: 'var(--muted)', margin: '0 0 0.8rem 0' }}>
-          {isHost ? '由房主決定，開打之後整局固定。倍率同時吃在怪物的 HP、傷害與防禦上。' : '由房主決定。倍率同時吃在怪物的 HP、傷害與防禦上。'}
+          {isHost ? '由房主決定，開打之後整局固定。' : '由房主決定。'}
+          倍率吃在怪物的 HP 與傷害上；防禦是另外加的固定點數，因為 AC 是擲骰門檻，用乘的會讓命中率整個垮掉。
         </p>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
           {DND_DIFFICULTIES.map((id) => {
             const selected = difficulty === id;
             const percent = Math.round(DND_DIFFICULTY_MULTIPLIER[id] * 100);
+            const acBonus = DND_DIFFICULTY_AC_BONUS[id];
             return (
               <button
                 key={id}
@@ -1335,7 +1348,9 @@ function DndCharacterLobby({ room }: { room: RoomView }) {
                 }}
               >
                 <div style={{ fontWeight: 'bold', fontSize: '0.9rem' }}>{DND_DIFFICULTY_LABEL[id]}</div>
-                <div style={{ fontSize: '0.72rem', color: 'var(--muted)' }}>怪物強度 {percent}%</div>
+                <div style={{ fontSize: '0.72rem', color: 'var(--muted)' }}>
+                  HP／傷害 {percent}%{acBonus !== 0 && ` · 防禦 ${acBonus > 0 ? '+' : ''}${acBonus}`}
+                </div>
               </button>
             );
           })}

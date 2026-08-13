@@ -894,11 +894,26 @@ export const DND_DIFFICULTY_LABEL: Record<DndDifficulty, string> = {
   hell: '地獄',
 };
 
+/** 難度對怪物 HP 與傷害的倍率。AC 不吃這個，看 DND_DIFFICULTY_AC_BONUS。 */
 export const DND_DIFFICULTY_MULTIPLIER: Record<DndDifficulty, number> = {
   easy: 0.7,
   normal: 1,
   hard: 1.2,
   hell: 1.5,
+};
+
+/**
+ * 難度對怪物 AC 的加值。刻意跟 DND_DIFFICULTY_MULTIPLIER 分開 ——
+ * HP 與傷害是「數量」，乘法很合理；AC 是 d20 上的門檻，乘法會讓命中率斷崖式下滑。
+ * 而且命中判定沒有大成功規則（`roll + hitBonus >= ac`），AC 只要超過
+ * 「20 + 命中加值」就是數學上打不到 —— 舊的 ×1.5 會讓邪神在地獄難度變成 AC 24，
+ * 基礎命中 +3 的法師／牧師／詩人／術士連擲 20 都摸不到牠。
+ */
+export const DND_DIFFICULTY_AC_BONUS: Record<DndDifficulty, number> = {
+  easy: -2,
+  normal: 0,
+  hard: 2,
+  hell: 4,
 };
 
 export interface DndPiece {
