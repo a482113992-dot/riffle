@@ -232,8 +232,9 @@ export function DndRoom({ room }: { room: RoomView }) {
     if (myBossTurn) {
       const clicked = game.board[r]?.[c]?.piece;
 
-      // 點到另一隻還能指揮的怪就直接換過去（含還沒選任何怪的情況）
-      if (clicked?.type === 'goblin' && !game.actedMonsterIds.includes(clicked.id)) {
+      // 點到另一隻還能指揮的怪就直接換過去（含還沒選任何怪的情況）。
+      // ally 要排掉 —— 召喚物與被洗腦的怪同樣是 'goblin'，但不歸魔王管。
+      if (clicked?.type === 'goblin' && !clicked.ally && !game.actedMonsterIds.includes(clicked.id)) {
         if (clicked.id !== selectedMonsterId) {
           setSelectedMonsterId(clicked.id);
           setBossMode(game.movedMonsterIds.includes(clicked.id) ? 'attack' : 'move');
@@ -990,8 +991,9 @@ export function DndRoom({ room }: { room: RoomView }) {
                         let borderClass = '';
                         if (myBossTurn) {
                           if (!selectedMonster) {
-                            // 還沒選怪：可以指揮的怪物亮起來
-                            if (cell.piece?.type === 'goblin' && !game.actedMonsterIds.includes(cell.piece.id)) {
+                            // 還沒選怪：可以指揮的怪物亮起來（召喚物與被洗腦的不歸魔王管）
+                            if (cell.piece?.type === 'goblin' && !cell.piece.ally
+                              && !game.actedMonsterIds.includes(cell.piece.id)) {
                               borderClass = 'can-attack';
                             }
                           } else {

@@ -1583,6 +1583,55 @@ describe('D&D Game Engine', () => {
     return { seats, state };
   }
 
+  /**
+   * 召喚物與被洗腦的怪 type 同樣是 'goblin'，但站在冒險者那一邊。
+   * 魔王指揮的判斷若只看 type，就能接管召喚術士的隨從去打自己人 ——
+   * 而且指揮過會記進 monsterActed，連 runAlliesTurn 那一輪都被吃掉。
+   */
+  function bossTableWithAlly() {
+    const { seats, state } = bossTable();
+    state.board[8][7].piece = {
+      id: 'ally-summoned', type: 'goblin', name: 'Elite Goblin (菁英哥布林)',
+      hp: 24, maxHp: 24, ac: 13, ally: true,
+    };
+    applyDndAction(seats, state, 'p1', { kind: 'rest' }, () => 0.5); // 交棒給魔王
+    return { seats, state };
+  }
+
+  it('should refuse to let the boss command a summoned minion', () => {
+    const { seats, state } = bossTableWithAlly();
+
+    for (const action of [
+      { kind: 'bossMove', monsterId: 'ally-summoned', r: 8, c: 8 },
+      { kind: 'bossAttack', monsterId: 'ally-summoned', targetId: 'p-p1' },
+      { kind: 'bossHold', monsterId: 'ally-summoned' },
+    ]) {
+      const res = applyDndAction(seats, state, 'boss', action);
+      expect(res.ok).toBe(false);
+      expect(res.error).toBe('MONSTER_NOT_FOUND');
+    }
+
+    // 沒被記成「已行動」，隨從這一輪還是歸 runAlliesTurn 管
+    expect(state.monsterActed.has('ally-summoned')).toBe(false);
+    expect(state.monsterMoved.has('ally-summoned')).toBe(false);
+  });
+
+  it('should still let the boss attack a summoned minion', () => {
+    const { seats, state } = bossTableWithAlly();
+    // 敵怪貼到隨從旁邊。不能打的話，隨從在魔王模式下會變成無敵肉牆
+    const pawn = findPiece(state, (p) => p.id === 'm-boss-test');
+    state.board[pawn.r][pawn.c].piece = null;
+    state.board[8][8].piece = pawn.piece;
+    pawn.piece.attackBonus = 40; // 必中，斷言才穩
+
+    const res = applyDndAction(seats, state, 'boss', {
+      kind: 'bossAttack', monsterId: 'm-boss-test', targetId: 'ally-summoned',
+    }, () => 0.9);
+
+    expect(res.ok).toBe(true);
+    expect(findPiece(state, (p) => p.id === 'ally-summoned').piece.hp).toBeLessThan(24);
+  });
+
   it('should hand the monster round to the boss player instead of running the AI', () => {
     const { seats, state } = bossTable();
 

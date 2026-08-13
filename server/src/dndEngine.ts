@@ -3865,7 +3865,11 @@ function applyBossAction(
 
   if (!action.monsterId) return { ok: false, error: 'BAD_ACTION' };
   const found = findPieceById(state, action.monsterId);
-  if (!found || found.piece.type !== 'goblin') return { ok: false, error: 'MONSTER_NOT_FOUND' };
+  // 用 isHostile 而不是 type === 'goblin'：召喚物與被洗腦的怪雖然也是 'goblin'，
+  // 但牠們站在冒險者那一邊，魔王不能指揮 —— 否則召喚術士召出來的隨從
+  // 會被魔王接管去打自己人，而且指揮過會記進 monsterActed，
+  // 連 runAlliesTurn 那一輪都被吃掉。
+  if (!found || !isHostile(found.piece)) return { ok: false, error: 'MONSTER_NOT_FOUND' };
   // 攻擊＝結束這隻怪的回合，之後不能再移動也不能再攻擊
   if (state.monsterActed.has(found.piece.id)) {
     return { ok: false, error: 'MONSTER_ALREADY_ACTED' };
@@ -3920,11 +3924,14 @@ function applyBossAction(
   if (!victim) return { ok: false, error: 'TARGET_NOT_FOUND' };
   // 村民也是合法目標 —— 只認 player 的話，護送關碰上魔王模式就變成白送：
   // 怪物全由魔王親自指揮（AI 的村民索敵根本不會跑），而他又一個村民都打不到。
-  const isVillager = victim.piece.type === 'villager';
-  if (!isVillager && victim.piece.type !== 'player') return { ok: false, error: 'TARGET_NOT_FOUND' };
+  // 召喚物與被洗腦的怪同理：AI 的索敵本來就把牠們當目標（runMonstersTurn），
+  // 魔王打不到的話，隨從在魔王模式下會變成無敵的肉牆。
+  // 這三種都沒有座位，seat 給 -1；effectiveAc 與傷害結算都有擋 seat < 0。
+  const seatless = victim.piece.type === 'villager' || victim.piece.type === 'decoy' || isAlly(victim.piece);
+  if (!seatless && victim.piece.type !== 'player') return { ok: false, error: 'TARGET_NOT_FOUND' };
 
-  const seat = isVillager ? -1 : seatIndexOfPiece(seats, victim.piece);
-  if (!isVillager && (seat === -1 || !state.seats[seat]?.alive)) {
+  const seat = seatless ? -1 : seatIndexOfPiece(seats, victim.piece);
+  if (!seatless && (seat === -1 || !state.seats[seat]?.alive)) {
     return { ok: false, error: 'TARGET_NOT_FOUND' };
   }
 
